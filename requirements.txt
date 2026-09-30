@@ -1,0 +1,8 @@
+anthropic>=1.0.0      # classifier backend "claude"
+google-genai>=1.14.0  # classifier backend "gemini" (free tier)
+faster-whisper>=1.1.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+gradio>=5.0.0
+groq>=0.20.0          # optional: cloud ASR backend (--asr groq)
+sarvamai>=0.1.30      # optional: Indic cloud ASR backend (--asr sarvam)

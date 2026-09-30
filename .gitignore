@@ -1,0 +1,17 @@
+# secrets
+.env
+
+# working data
+temp/
+output/
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.flac
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
