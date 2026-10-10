@@ -1,7 +1,16 @@
 # secrets
 .env
+client_secret*.json
+credentials*.json
+service-account*.json
+auth.json
 
-# working data
+# working data (input lectures, caches, results)
+input/
+jobs/
+uploads/
+frontend/node_modules/
+research/
 temp/
 output/
 *.mp4
@@ -15,3 +24,12 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Desktop releases and private release-signing key
+build/
+dist/
+releases/
+.release-private/
+logs/
+support/
+*.spec

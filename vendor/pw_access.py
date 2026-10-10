@@ -1,0 +1,703 @@
+"""
+pw_access.py - PW App Kit v2 client for Python backends/local apps.
+
+Copy this file into an app, set APP_NAME, and route all paid provider calls
+through the shared PW proxy. The app ships no provider keys. The proxy verifies
+the signed-in PW user, checks the app whitelist, makes the provider call with
+proxy-held keys, and writes trusted raw usage logs to MongoDB.
+
+Usage logging model:
+  - One successful proxy/provider call is recorded by the proxy. You do not
+    log anything yourself.
+  - The proxy ROLLS UP those calls server-side into one row per
+    (task, app, user, file, model) and the cost sheet reads the finished rows.
+    Apps and dashboards no longer combine raw rows themselves.
+  - ALWAYS pass a task_id. It is the only thing tying a job's calls together;
+    without one the job's volume cannot be totalled at all.
+  - count = what THIS call processed. See CONNECT-TO-PW-PROXY.md section 6.
+  - Do not use client-side combined logging for normal AI calls.
+
+Everywhere a google_token is accepted you may pass either:
+  - the token string from login, or
+  - a zero-arg function returning a fresh Google token.
+
+The kit automatically exchanges the Google token for a proxy-issued 7-day
+session pass, so long runs do not fail just because Google's token expires.
+"""
+
+import os
+import uuid
+from typing import Any, Dict, List, Optional
+
+import requests
+
+
+# ---------------------------------------------------------------------------
+# Per-app config. APP_NAME must exactly match a header in Whitelisted row 1.
+# ---------------------------------------------------------------------------
+APP_NAME = "Lecture_Trimmer"
+
+PROXY_BASE_URL = os.environ.get(
+    "PW_PROXY_BASE_URL", "https://pw-apps-proxy.vercel.app"
+).rstrip("/")
+
+_TIMEOUT = 30
+_AI_TIMEOUT = 300
+_LARGE_REQUEST_BYTES = 3_500_000
+
+
+class PWAccessError(Exception):
+    """Raised when a paid proxy/provider call fails."""
+
+
+def new_task_id(prefix: str = "task") -> str:
+    """Create a stable id for one user task/run."""
+    safe = "".join(ch for ch in str(prefix or "task") if ch.isalnum() or ch in "-_")
+    return f"{safe or 'task'}-{uuid.uuid4().hex}"
+
+
+def _headers(token: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+
+def _resolve_token(google_token) -> str:
+    return google_token() if callable(google_token) else google_token
+
+
+_session = {"token": "", "expiry": 0.0}
+
+
+def _auth_token(google_token, force_new: bool = False) -> str:
+    """Return a cached 7-day proxy session pass, or mint one from Google."""
+    import time
+
+    if not force_new and _session["token"] and time.time() < _session["expiry"] - 60:
+        return _session["token"]
+
+    g = _resolve_token(google_token)
+    try:
+        r = requests.post(
+            f"{PROXY_BASE_URL}/api/session",
+            headers=_headers(g),
+            json={},
+            timeout=_TIMEOUT,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            token = data.get("session_token") or ""
+            if token:
+                _session["token"] = token
+                _session["expiry"] = float(data.get("expires_at_ms") or 0) / 1000.0
+                return token
+    except Exception:
+        pass
+    return g
+
+
+def _post(path: str, google_token, payload: Dict[str, Any], timeout: int):
+    """POST to the proxy. On 401, mint a fresh proxy session pass once."""
+    r = requests.post(
+        f"{PROXY_BASE_URL}{path}",
+        headers=_headers(_auth_token(google_token)),
+        json=payload,
+        timeout=timeout,
+    )
+    if r.status_code == 401:
+        r = requests.post(
+            f"{PROXY_BASE_URL}{path}",
+            headers=_headers(_auth_token(google_token, force_new=True)),
+            json=payload,
+            timeout=timeout,
+        )
+    return r
+
+
+def check_allowed(google_token, app: str = APP_NAME) -> bool:
+    """Call before every paid/main action. Fail closed."""
+    return check_allowed_status(google_token, app) == "allowed"
+
+
+def check_allowed_status(google_token, app: str = APP_NAME) -> str:
+    """Return one of: allowed, denied, error."""
+    if not google_token:
+        return "denied"
+    try:
+        r = _post("/api/allowlist", google_token, {"app": app}, _TIMEOUT)
+        if r.status_code == 200:
+            return "allowed" if bool(r.json().get("allowed")) else "denied"
+        if r.status_code == 403:
+            return "denied"
+        return "error"
+    except Exception:
+        return "error"
+
+
+def log_usage(
+    google_token,
+    *,
+    filename: str,
+    input_unit: str,
+    count: Any,
+    items: List[Dict[str, Any]],
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+) -> Optional[dict]:
+    """Legacy/manual audit endpoint.
+
+    Do not use this for normal AI calls. The provider helpers below already
+    create trusted raw logs inside the proxy. This function exists only for
+    unusual/manual audit cases and never writes trusted cost rows to the raw
+    export sheet.
+    """
+    try:
+        r = _post(
+            "/api/usage-log",
+            google_token,
+            {
+                "app": app,
+                "filename": filename,
+                "task_id": task_id,
+                "input_unit": input_unit,
+                "count": count,
+                "items": items,
+                "video_duration": video_duration,
+            },
+            _TIMEOUT,
+        )
+        return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+class UsageSession:
+    """Backward-compatible task context.
+
+    Old kit versions used UsageSession to suppress per-call logging and write a
+    combined manual row on flush(). In v2, the proxy logs every raw provider
+    call. This class now only provides one shared task_id plus optional default
+    metadata for old code that already passes session=.
+    """
+
+    def __init__(
+        self,
+        google_token,
+        *,
+        filename: str = "",
+        input_unit: str = "",
+        count: Any = None,
+        video_duration: str = "",
+        app: str = APP_NAME,
+        task_id: str = "",
+    ):
+        self.token = google_token
+        self.task_id = task_id or new_task_id()
+        self.filename = filename
+        self.input_unit = input_unit
+        self.count = count
+        self.video_duration = video_duration
+        self.app = app
+
+    def add(self, model="", tokens_in=0, tokens_out=0, cost_inr=None):
+        return None
+
+    def flush(self):
+        """Compatibility no-op. Raw provider rows are already logged."""
+        return {
+            "ok": True,
+            "task_id": self.task_id,
+            "note": "raw provider calls already logged by proxy",
+        }
+
+
+def _apply_task_context(payload: Dict[str, Any], session=None, task_id: str = "") -> None:
+    if session is not None:
+        if not task_id:
+            task_id = getattr(session, "task_id", "")
+        if payload.get("app") == APP_NAME and getattr(session, "app", APP_NAME) != APP_NAME:
+            payload["app"] = getattr(session, "app")
+        for key in ("filename", "input_unit", "video_duration"):
+            if not payload.get(key) and getattr(session, key, ""):
+                payload[key] = getattr(session, key)
+        if (
+            (payload.get("count") is None or payload.get("count") == "")
+            and getattr(session, "count", None) is not None
+        ):
+            payload["count"] = getattr(session, "count")
+    if task_id:
+        payload["task_id"] = task_id
+
+
+def _raise_proxy_error(name: str, r) -> None:
+    if r.status_code != 200:
+        raise PWAccessError(f"{name} proxy error {r.status_code}: {r.text[:300]}")
+
+
+def _upload_large_json(google_token, app: str, request: dict, provider_name: str) -> str:
+    import json
+
+    request_bytes = json.dumps(request).encode("utf-8")
+    if len(request_bytes) <= _LARGE_REQUEST_BYTES:
+        return ""
+
+    up = _post("/api/gemini/upload-url", google_token, {"app": app}, _TIMEOUT)
+    if up.status_code != 200:
+        raise PWAccessError(f"{provider_name} upload-url error {up.status_code}: {up.text[:300]}")
+
+    pr = requests.put(
+        up.json()["upload_url"],
+        data=request_bytes,
+        headers={"Content-Type": "application/json"},
+        timeout=_AI_TIMEOUT,
+    )
+    if pr.status_code != 200:
+        raise PWAccessError(f"{provider_name} upload error {pr.status_code}: {pr.text[:300]}")
+    return pr.json().get("url", "")
+
+
+# ---------------------------------------------------------------------------
+# Media offload. Vercel bills bytes leaving the proxy at ~4x the Blob rate, so
+# shipping base64 images/PDFs *through* the proxy is the single largest line on
+# the hosting bill. Instead we upload the raw bytes once and send a reference;
+# the provider fetches them straight from storage. Nothing in an app changes —
+# keep sending inlineData exactly as before and this swaps it underneath.
+# ---------------------------------------------------------------------------
+# Per-part floor. Real payloads turned out to be many small page crops rather
+# than a few big images (Module QC, 2026-09-07: ~967 KB spread thin), so a high
+# floor silently offloaded nothing at all.
+_MEDIA_OFFLOAD_MIN_BYTES = 40_000
+# ...but each offloaded part costs two extra HTTP round trips, so a request is
+# only worth offloading once its media adds up to something meaningful.
+_MEDIA_OFFLOAD_MIN_TOTAL = 300_000
+# Bound the added latency on pathological requests.
+_MEDIA_OFFLOAD_MAX_PARTS = 24
+_OFFLOADABLE = {"application/pdf", "image/png", "image/jpeg", "image/webp"}
+
+
+def _offload_note(msg: str) -> None:
+    """One line so an offload that does nothing is visible instead of silent —
+    the failure mode that made this take four database queries to find."""
+    try:
+        print(f"[pw_access] media offload: {msg}", flush=True)
+    except Exception:
+        pass
+
+
+def _upload_media(google_token, app: str, raw: bytes, content_type: str) -> str:
+    """Upload one file, return its store pathname ('' if the proxy is older)."""
+    up = _post("/api/gemini/upload-url", google_token,
+               {"app": app, "content_type": content_type}, _TIMEOUT)
+    if up.status_code != 200:
+        return ""
+    info = up.json()
+    pathname = info.get("pathname") or ""
+    if not pathname:
+        return ""      # proxy predates media offload — caller keeps the inline path
+    pr = requests.put(info["upload_url"], data=raw,
+                      headers={"Content-Type": content_type}, timeout=_AI_TIMEOUT)
+    if pr.status_code != 200:
+        raise PWAccessError(f"media upload failed {pr.status_code}: {pr.text[:200]}")
+    # The store returns where the object ACTUALLY landed, which need not match
+    # the pathname we asked for. _upload_large_json has always used this value;
+    # trusting the proposed pathname instead produced links to nothing and a
+    # Vertex BadRequestError (2026-09-07). Prefer the authoritative location.
+    try:
+        body = pr.json()
+    except Exception:
+        body = {}
+    return body.get("url") or body.get("pathname") or pathname
+
+
+def _offload_media_parts(google_token, app: str, request: dict) -> dict:
+    """Replace large inlineData parts with file_ref parts so the provider fetches
+    the bytes itself instead of us relaying them. Returns the request unchanged
+    if there is nothing worth offloading, or if anything goes wrong — this is an
+    optimisation and must never break a working call."""
+    import base64, copy
+
+    contents = (request or {}).get("contents") or []
+    if not contents:
+        return request
+    try:
+        # Pass 1: find candidates and check whether they are worth the round trips.
+        candidates = []          # (content_idx, part_idx, raw_bytes, mime)
+        skipped_small = 0
+        for ci, content in enumerate(contents):
+            for pi, part in enumerate(content.get("parts") or []):
+                blob = (part or {}).get("inlineData") or (part or {}).get("inline_data")
+                if not blob or not blob.get("data"):
+                    continue
+                mime = blob.get("mimeType") or blob.get("mime_type") or ""
+                if mime not in _OFFLOADABLE:
+                    continue
+                raw = base64.b64decode(blob["data"])
+                if len(raw) < _MEDIA_OFFLOAD_MIN_BYTES:
+                    skipped_small += 1
+                    continue
+                candidates.append((ci, pi, raw, mime))
+
+        if not candidates:
+            if skipped_small:
+                _offload_note(f"nothing offloaded — {skipped_small} media part(s) "
+                              f"below {_MEDIA_OFFLOAD_MIN_BYTES // 1000} KB")
+            return request
+
+        total = sum(len(r) for _, _, r, _ in candidates)
+        if total < _MEDIA_OFFLOAD_MIN_TOTAL:
+            _offload_note(f"skipped — only {total // 1024} KB of media, "
+                          f"below the {_MEDIA_OFFLOAD_MIN_TOTAL // 1024} KB floor")
+            return request
+
+        # Biggest first, so a capped request still sheds the most bytes.
+        candidates.sort(key=lambda c: len(c[2]), reverse=True)
+        if len(candidates) > _MEDIA_OFFLOAD_MAX_PARTS:
+            _offload_note(f"capping at {_MEDIA_OFFLOAD_MAX_PARTS} of "
+                          f"{len(candidates)} parts to bound latency")
+            candidates = candidates[:_MEDIA_OFFLOAD_MAX_PARTS]
+
+        # Pass 2: upload and rewrite.
+        out = copy.deepcopy(contents)
+        moved = 0
+        for ci, pi, raw, mime in candidates:
+            pathname = _upload_media(google_token, app, raw, mime)
+            if not pathname:
+                _offload_note("aborted — proxy did not return a pathname "
+                              "(older proxy or upload-url rejected the request); "
+                              "sending inline as before")
+                return request
+            part = out[ci]["parts"][pi]
+            part.pop("inlineData", None)
+            part.pop("inline_data", None)
+            part["file_ref"] = {"pathname": pathname, "mime_type": mime}
+            moved += len(raw)
+
+        _offload_note(f"offloaded {len(candidates)} part(s), {moved // 1024} KB "
+                      f"now fetched directly by the provider")
+        return {**request, "contents": out}
+    except PWAccessError:
+        raise
+    except Exception as e:
+        _offload_note(f"fell back to inline after an error: {e}")
+        return request
+
+
+def gemini_generate(
+    google_token,
+    *,
+    model: str,
+    request: dict,
+    filename: str = "",
+    input_unit: str = "",
+    count: Any = None,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call Gemini through the proxy. Returns a Gemini-shaped result."""
+    payload = {
+        "app": app,
+        "model": model,
+        "request": request,
+        "filename": filename,
+        "input_unit": input_unit,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    # Send big media by reference; only then decide if the remainder still needs
+    # the whole-request detour (usually it no longer does).
+    request = _offload_media_parts(google_token, payload["app"], request)
+    payload["request"] = request
+    blob_url = _upload_large_json(google_token, payload["app"], request, "gemini")
+    if blob_url:
+        payload.pop("request")
+        payload["request_blob_url"] = blob_url
+
+    r = _post("/api/gemini/generate", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("gemini", r)
+    return r.json()
+
+
+def mathpix_ocr(
+    google_token,
+    *,
+    request: dict,
+    filename: str = "",
+    count: Any = 1,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call Mathpix OCR through the proxy."""
+    payload = {
+        "app": app,
+        "request": request,
+        "filename": filename,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    r = _post("/api/mathpix/ocr", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("mathpix", r)
+    return r.json()
+
+
+def sarvam_tts(
+    google_token,
+    *,
+    request: dict,
+    filename: str = "",
+    count: Any = None,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call Sarvam TTS through the proxy."""
+    payload = {
+        "app": app,
+        "request": request,
+        "filename": filename,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    r = _post("/api/sarvam/tts", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("sarvam", r)
+    return r.json()
+
+
+def elevenlabs_tts(
+    google_token,
+    *,
+    voice_id: str,
+    request: dict,
+    output_format: str = "mp3_44100_128",
+    filename: str = "",
+    count: Any = None,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call ElevenLabs TTS through the proxy."""
+    payload = {
+        "app": app,
+        "voice_id": voice_id,
+        "request": request,
+        "output_format": output_format,
+        "filename": filename,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    r = _post("/api/elevenlabs/tts", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("elevenlabs", r)
+    return r.json()
+
+
+def claude_generate(
+    google_token,
+    *,
+    model: str,
+    request: dict,
+    filename: str = "",
+    input_unit: str = "",
+    count: Any = None,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call Claude through the proxy."""
+    payload = {
+        "app": app,
+        "model": model,
+        "request": request,
+        "filename": filename,
+        "input_unit": input_unit,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    blob_url = _upload_large_json(google_token, payload["app"], request, "claude")
+    if blob_url:
+        payload.pop("request")
+        payload["request_blob_url"] = blob_url
+
+    r = _post("/api/claude/generate", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("claude", r)
+    return r.json()
+
+
+def gemini_tts(
+    google_token,
+    *,
+    text: str,
+    voice: str = "Kore",
+    model: str = "gemini-3.1-flash-tts-preview",
+    filename: str = "",
+    count: Any = None,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call Gemini TTS through the proxy."""
+    payload = {
+        "app": app,
+        "model": model,
+        "text": text,
+        "voice": voice,
+        "filename": filename,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    r = _post("/api/gemini/tts", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("gemini tts", r)
+    return r.json()
+
+
+def gemini_image(
+    google_token,
+    *,
+    prompt: str,
+    model: str = "gemini-3.1-flash-image",
+    filename: str = "",
+    count: Any = 1,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call Gemini image generation through the proxy."""
+    payload = {
+        "app": app,
+        "model": model,
+        "prompt": prompt,
+        "filename": filename,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    r = _post("/api/gemini/image", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("gemini image", r)
+    return r.json()
+
+
+def gpt_generate(
+    google_token,
+    *,
+    request: dict,
+    model: str = "gpt-5.6-luna-ard-content",
+    filename: str = "",
+    input_unit: str = "",
+    count: Any = None,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call a ChatGPT model through the proxy.
+
+    `request` is a native OpenAI chat.completions body and is sent through
+    unchanged, e.g. {"messages": [{"role": "user", "content": "hi"}]}. Images
+    and PDFs go in as base64 data URLs in the usual OpenAI content-part form.
+    Models: gpt-5.6-luna-ard-content | gpt-5.6-sol-ard-content |
+    gpt-5.6-terra-ard-content. Check what is live: GET /api/gpt/models.
+    """
+    payload = {
+        "app": app,
+        "model": model,
+        "request": request,
+        "filename": filename,
+        "input_unit": input_unit,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    blob_url = _upload_large_json(google_token, payload["app"], request, "gpt")
+    if blob_url:
+        payload.pop("request")
+        payload["request_blob_url"] = blob_url
+
+    r = _post("/api/gpt/generate", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("gpt", r)
+    return r.json()
+
+
+def gpt_tts(
+    google_token,
+    *,
+    text: str,
+    voice: str = "alloy",
+    model: str = "tts-ard-content",
+    response_format: str = "mp3",
+    filename: str = "",
+    count: Any = None,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call OpenAI text-to-speech through the proxy.
+
+    Voices: alloy | echo | fable | onyx | nova | shimmer.
+    Models: tts-ard-content (standard) | tts-hd-ard-content (higher quality).
+    Returns {"result": {"audio_base64": ..., "content_type": ...}, ...}.
+    """
+    payload = {
+        "app": app,
+        "model": model,
+        "text": text,
+        "voice": voice,
+        "response_format": response_format,
+        "filename": filename,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    r = _post("/api/gpt/tts", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("gpt tts", r)
+    return r.json()
+
+
+def gpt_image(
+    google_token,
+    *,
+    prompt: str,
+    model: str = "gpt-image-2-litellm",
+    size: str = "",
+    quality: str = "",
+    filename: str = "",
+    count: Any = 1,
+    task_id: str = "",
+    video_duration: str = "",
+    app: str = APP_NAME,
+    session: UsageSession = None,
+) -> dict:
+    """Call OpenAI image generation through the proxy.
+
+    Returns {"result": {"images": [{"image_base64"|"url", "content_type"}],
+    "revised_prompt": ...}, ...}. `count` is the number of images (n).
+    """
+    payload = {
+        "app": app,
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "quality": quality,
+        "filename": filename,
+        "count": count,
+        "video_duration": video_duration,
+    }
+    _apply_task_context(payload, session, task_id)
+    r = _post("/api/gpt/image", google_token, payload, _AI_TIMEOUT)
+    _raise_proxy_error("gpt image", r)
+    return r.json()

@@ -1,0 +1,17 @@
+[
+  {"text":"Welcome everyone, please say hello in the chat.","expected":"chatter"},
+  {"text":"Today we are learning the area of a rectangle. Area measures the surface enclosed by a shape.","expected":"core_teaching"},
+  {"text":"Suppose a rectangle has length l and width w. We divide it into unit squares to derive the general rule.","expected":"core_teaching"},
+  {"text":"Each row contains l squares and there are w rows, therefore area equals l times w. This is a formula for every rectangle.","expected":"core_teaching"},
+  {"text":"A student asks why area is measured in square units. Because we count two-dimensional unit squares, not lengths.","expected":"core_teaching"},
+  {"text":"Exercise one: a garden is 7 metres long and 3 metres wide. Find its area and then its perimeter.","expected":"worked_example"},
+  {"text":"For this garden the given length is 7 and width is 3. First write A equals l times w.","expected":"worked_example"},
+  {"text":"Why multiply here? The garden has three rows of seven unit squares. This explains the calculation for our garden.","expected":"worked_example"},
+  {"text":"Seven times three is 21, so the answer to the first part is 21 square metres.","expected":"worked_example"},
+  {"text":"Isi question ka second part perimeter hai. Add all four sides: 7 plus 3 plus 7 plus 3.","expected":"worked_example"},
+  {"text":"The garden's perimeter is 20 metres. Both parts of exercise one are now solved.","expected":"worked_example"},
+  {"text":"Tomorrow's class begins at nine. Download the worksheet from the class portal.","expected":"admin_announcement"},
+  {"text":"Back to the general concept: perimeter measures a boundary, while area measures the enclosed surface.","expected":"core_teaching"},
+  {"text":"A conceptual doubt: can area be negative? A physical area is nonnegative because it measures surface size.","expected":"core_teaching"},
+  {"text":"My microphone is not working. Please wait while I reconnect it.","expected":"technical_issue"}
+]

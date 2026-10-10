@@ -1,0 +1,471 @@
+LECTURE TRIMMER — CONTEXT AND HANDOVER FOR CLAUDE
+Prepared: 9 October 2026
+Project: D:\PW Automations\Lecture_Trimmer
+Owner's Windows account: Niwas
+
+PURPOSE OF THIS FILE
+This records the recent discussions, implemented changes, experiments, current
+configuration, and remaining work. Continue from the existing codebase. Verify
+live state before changing a running job. This file contains no API keys, OAuth
+tokens, service-account secrets, or signing-key contents.
+
+UPDATE 10 OCTOBER 2026 — SPEECH IS GROQ-ONLY
+The owner chose Groq Whisper large-v3-turbo as the only speech engine. PW Gemini
+Flash-Lite speech, Sarvam and local faster-whisper were deleted from the code
+(gemini_transcriber.py, tools/benchmark_pw_audio.py and their tests are gone).
+Sections below that describe those engines are history. Reasons, measured on the
+full "Living World" lecture: Flash-Lite took ~50 min (17/59 sections returned
+broken timestamps, 8 PW timeouts), covered 78% of the lecture vs Groq 95%, and
+had ~38 s timing errors; Groq takes < 2 min. Gemini 3.5 Transcribe (direct
+Google key) tested best on a 2-minute sample but costs ~$0.33/audio hour and was
+not adopted. Data: research/evaluations/biology-living-world-flashlite-speech/.
+The transcript cache key keeps the old field values so earlier transcripts match.
+Same day: the Gradio "Classic" page was removed (Studio only), the old installed
+EXE was uninstalled (its output/ folder kept), and a fresh installer was built:
+releases/1.1.0/LectureTrimmer-1.1.0-Setup.exe (runtime smoke test passed). By the
+owner's decision it packages the owner's Groq key (see DESKTOP_RELEASE_GUIDE.txt).
+No update-channel link is preset; Drive publication is still not set up.
+
+1. PRODUCT REQUIREMENTS AND USER PREFERENCES
+
+The tool takes long teaching videos and produces three selectable study videos:
+
+* Question solving: question statements, subparts, solution steps, final answers,
+  exercise-related doubts, and theory needed to understand the solution.
+* Theory: topics, definitions, formulas, derivations, proofs, conceptual doubts,
+  and illustrative examples used to explain a concept.
+* Theory + questions: both categories in the original lecture order.
+
+Remove nonacademic material: motivation, greetings, unrelated chatter, homework
+submission polls, leaderboards, platform logistics, announcements, technical
+interruptions, and closing discussion. Actual homework problem solutions and
+academic doubts must remain.
+
+Short theory explanations between solution steps must stay with the question.
+Do not turn theory or question videos into disconnected clips lasting a few
+seconds. Preserve complete teaching context and smooth cuts.
+
+Support different subjects, teachers, teaching styles, Hindi, English, and
+Hinglish. Processing 2–4-hour lectures should be reasonably fast, but speed must
+not compromise essential teaching content. Do not force a target retention
+percentage or duration.
+
+The user wants a shareable Windows EXE, private Google Sheet authentication,
+an Update button, a compact attractive interface, logo/icon, Stop processing,
+visible progress, useful output accuracy, simple user errors, and detailed
+private diagnostics for support.
+
+Current explicit speech preference: GROQ WHISPER LARGE V3 TURBO.
+Classification remains Gemini through the PW proxy.
+The latest request was to provide this memory file for Claude.
+
+2. EARLIER PROBLEMS AND DESIGN DISCUSSIONS
+
+Earlier theory/question outputs were not sufficiently separated. Theory output
+had frequent small cuts. Some uncertain teaching sections were included in both
+categories. A previously trimmed video was about 49 minutes; newer combined
+outputs became about 1h39m or longer. One 2h7m40s lecture produced approximately
+1h34m questions, 33m theory, and 1h57m combined.
+
+Conservative retention, shared uncertain sections, and preservation of complete
+activities contributed to larger outputs. Duration alone does not establish
+accuracy; compare necessary teaching and removable nonacademic material.
+There is no completed human-verified accuracy benchmark proving the current
+classifier handles every teacher and subject correctly.
+
+The app also appeared unresponsive after clicking Create, lacked visible
+progress, sometimes took over 21 minutes, and repeatedly failed with generic
+errors. Work addressed progress, diagnostics, caching, cancellation, rendering,
+provider errors, and packaging rather than claiming every possible bug is gone.
+
+3. TECHNOLOGY STACK
+
+Python 3.11; Gradio 6.x; FastAPI/Starlette; Uvicorn; FFmpeg/FFprobe; Pydantic;
+Google GenAI SDK; supplied PW access kit; Groq SDK; optional Anthropic/Sarvam;
+faster-whisper/CTranslate2 for local speech; Google OAuth; PyInstaller;
+cryptography/Ed25519 for signed updates.
+
+The EXE launches a local HTTP server and opens a browser UI. It is a desktop
+launcher for the local web interface, not a fully native UI.
+
+4. SOURCE ORGANIZATION
+
+Root Python entry points: app.py and main.py.
+
+lecture_trimmer/
+  config.py, models.py, paths.py, cli.py, __main__.py
+  analysis/
+    classifier.py, lesson_classifier.py, prompts.py, visual_evidence.py
+  processing/
+    pipeline.py, editor.py, lesson_planner.py, job_control.py
+  media/
+    audio.py, cutter.py, transcriber.py, gemini_transcriber.py,
+    transcript_export.py
+  auth/
+    access_control.py, pw_desktop_auth.py
+  integrations/
+    pw_proxy.py, pw_diagnostics.py, ai_usage.py
+  runtime/
+    diagnostics.py
+  ui/
+    app.py, ui_style.py, branding.py
+
+desktop_runtime/
+  desktop_paths.py, desktop_update.py, dependencies.py
+
+tools/
+  desktop_launcher.py, desktop_installer.py, build_desktop.py,
+  release_manifest.py, smoke_desktop.py, start_groq.py,
+  benchmark_pw_audio.py, desktop_compat/
+
+vendor/pw_access.py
+assets/ — logo and PNG/SVG/ICO branding
+docs/ — architecture, authentication, release, contributor documentation
+tests/ — automated regressions
+
+The old scattered root modules were moved into packages. Compatibility adapters
+remain under tools/desktop_compat; packaging places these at the payload root
+where older frozen EXEs expect them. Preserve canonical shared module instances
+and legacy aliases, particularly updater locks/state. Do not recreate separate
+instances of desktop_paths or desktop_update accidentally.
+
+Read README.md, docs/ARCHITECTURE.md, docs/CONTRIBUTING.md,
+docs/PW_DESKTOP_SETUP.md, docs/AUTH_SETUP.md, and
+docs/DESKTOP_RELEASE_GUIDE.txt. Inspect the working tree before editing. There
+is extensive existing uncommitted work; do not reset or discard it.
+
+5. DATA FLOW AND CLASSIFICATION ARCHITECTURE
+
+Google login / PW access verification
+  -> upload ownership and immutable source snapshot
+  -> FFmpeg audio extraction
+  -> speech recognition and cached transcript
+  -> downloadable raw timestamped transcript files
+  -> complete teaching-activity map and passage review
+  -> academic/nonacademic edits and dependency-aware category ranges
+  -> shared section rendering
+  -> three outputs, analysis report, timings, and AI usage
+
+Classification primarily uses transcript text. Optional selected-frame review
+adds bounded visual evidence for uncertain teaching sections. It is not
+continuous understanding of the entire video. Static board content alone does
+not establish that the teacher's current speech is academic.
+
+Current classification version: lessons-v5.2-study-only.
+Current rendering version seen in reports: render-v4-pcm.
+
+The classifier now reasons about complete teaching activities and reviews
+passages within them. It should remove chatter inside a question without losing
+the related theory. Unresolved activity/category conflicts require correction
+or review instead of automatically publishing them in both category videos.
+Silent board work inside genuine teaching remains protected. That protection
+must not retain an entire poll or closing announcement.
+
+Older analysis caches are invalidated by prompt/version changes. Transcription
+can be reused independently when its source and speech settings match.
+
+6. PERFORMANCE, PROGRESS, STOP, AND MEDIA HANDLING
+
+Implemented immediate processing status, elapsed time, live transcription-section
+progress, real FFmpeg progress, and independently delivered finished videos.
+Failure of one export does not hide other completed videos.
+
+Sources are snapshotted to protect against changing uploads. Cache keys include
+source identity and relevant processing settings. Cloud audio sections survive
+retries. Shared source sections are rendered once and reused across categories.
+Verified completed exports can also be reused.
+
+Encoder selection tests NVIDIA NVENC, then Intel Quick Sync, then CPU libx264.
+Hardware failures can fall back to CPU. Precise cuts use frame alignment,
+boundary padding, and short audio fades. PCM intermediates and final AAC
+encoding avoid accumulated audio timing drift. Audio continuity and timing are
+validated. Fast keyframe cuts fall back to precise cuts when they would restore
+excluded speech.
+
+Stop processing propagates a per-job cancellation context through worker
+threads and FFmpeg. Completed work is retained. An external request already
+in flight can finish and incur a charge; Stop prevents further sections from
+starting. Job ownership and update locks must remain enforced.
+
+No universal processing-time promise exists. Duration, resolution, output
+selection, provider quotas, network and hardware all affect total runtime.
+
+7. AUTHENTICATION, OWNERSHIP, AND PW KIT
+
+The user created a Google Cloud project and provided Desktop OAuth JSON.
+PW desktop mode uses approved @pw.live accounts and the private Google Sheet
+column Lecture_Trimmer. Keep that exact application/column name.
+
+User-provided Sheet:
+https://docs.google.com/spreadsheets/d/1aaF3y0VsgyB_YcyfDK33VWcCagzwxBPOwjoe2TvfbHE/edit?gid=803879933
+
+Do not publish the authentication Sheet or distribute service-account keys,
+personal provider keys, saved tokens or signed-in sessions.
+
+The supplied updated kit is vendor/pw_access.py. It was replaced while keeping
+Lecture_Trimmer as the app name. It supports storage offloading for supported
+large media/request payloads. Load a separate kit instance per login because
+the kit caches session information internally.
+
+Uploads, generated media, transcripts, reports and queue access are restricted
+to their owner. New output files must pass through FileOwnership.publish and
+receive exact cache-path grants. Never bypass this by adding a download route.
+
+Transient allowlist errors have bounded retries; failures deny access. Reuse
+recent job access checks briefly while still enforcing expiry/logout/revocation.
+Sessions and file ownership are currently memory-only. Restart signs users out.
+Multiple servers would need shared session/ownership storage and coordination.
+
+8. DESKTOP INSTALLATION AND UPDATES
+
+Installed EXE:
+C:\Users\Niwas\AppData\Local\Programs\LectureTrimmer\LectureTrimmer.exe
+
+Persistent data:
+C:\Users\Niwas\AppData\Local\LectureTrimmer
+
+Last verified installed application version: 1.0.7.
+Previous application version retained: 1.0.6.
+The stable frozen runtime remains runtime version 1.
+
+The original 1.0.0 Setup EXE contains older application code. Do not present it
+as a fresh installer already containing all 1.0.7 features. Existing installs
+have received signed application updates locally.
+
+A missing safehttpx/version.txt startup error was repaired. Build configuration
+collects safehttpx and groovy package data. Python, FFmpeg and UI dependencies
+are bundled. Do not share only the small executable from a portable folder;
+the _internal folder is required beside it.
+
+Update design: signed latest.json and signed application ZIP, hash validation,
+explicit file allowlist, staging, restart, retained previous version, and startup
+rollback. User videos, caches and settings persist separately. Dependency/runtime
+changes may require a new installer rather than a code-only update.
+
+Owner's release Drive folder:
+https://drive.google.com/drive/folders/1d7fGM93tAx2YuUCjU5-RmxbyLxtr_zBT
+
+IMPORTANT: remote Drive publication/update-channel setup is not confirmed
+complete. Local builds and installation are complete. Do not claim remote users
+can update until readable release-file links and the channel are verified.
+
+The updater needs a latest.json FILE link, not only the folder link. Keep its
+Drive file ID stable using Manage versions for new metadata. Release downloads
+can be link-readable without exposing the private authentication Sheet.
+
+Private signing key: .release-private/signing-key.bin.
+Never expose its contents, package it, or upload it. Preserve signing trust.
+Use increasing release versions; never overwrite immutable installed releases.
+Updates must not start during active lecture processing.
+
+The installer is not Authenticode-signed. Update signing is separate from
+Windows publisher/SmartScreen trust.
+
+9. UI AND SUPPORT
+
+The interface was made more compact with improved typography, layout, logo,
+favicon, and Windows icon. It includes upload/settings, three output tabs,
+progress, Stop, transcript/report downloads, updates, and support export.
+The normal PW connection-check control was removed. Separate diagnostic tools
+remain available in the codebase.
+
+Users see short errors with references. Detailed sanitized diagnostics and
+rotating logs remain local. Save support report produces a ZIP for manual
+sharing; there are no automatic uploads. Reports exclude lecture media,
+transcripts, tokens, and provider keys. Do not dump raw proxy error bodies.
+
+10. SPEECH PROVIDER DISCUSSIONS AND TESTS
+
+We discussed local Whisper, Groq, Gemini, Sarvam and OpenAI speech recognition.
+Do not interpret discussions as completed implementations or measured accuracy.
+
+Sarvam 105B (sarvam-105b) is a text model. Sarvam ASR uses Saaras. The supplied
+PW kit has Sarvam TTS but no dedicated Sarvam STT integration. A direct Sarvam
+key exists locally, but the user chose PW-only experiments instead. Do not use
+that direct key without authorization. Current optional direct ASR config uses
+saaras:v4.
+
+The same 120-second physics excerpt was tested through PW:
+
+Model                    Result       Provider time      PW cost
+gemini-3.5-flash          completed    34.764 seconds     INR 6.3622
+gemini-3.5-flash-lite     completed    28.915 seconds     INR 0.3988
+gemini-3.8-flash          timed out    approximately 300s unknown
+
+These were individual transcription requests with byte-identical sample audio.
+They were not full-video speed tests or human-scored accuracy comparisons.
+Flash-Lite was approximately 94% cheaper in that sample. A simple two-hour
+transcription extrapolation was INR 23.93 for Lite, excluding classification,
+rendering, retries and other costs. Serial API time would be about 28.9 minutes
+for two hours; bounded parallelism may reduce it, but this was not measured on
+a full lecture. Do not treat projections as actual bills or guaranteed runtimes.
+
+Reports are in temp/pw_audio_benchmarks/.
+Summary: temp/pw_audio_benchmarks/model-comparison.json.
+Isolated authenticated benchmark tool: tools/benchmark_pw_audio.py.
+Earlier separate test servers used ports 7862 and 7863; check current processes.
+
+11. GEMINI SPEECH INTEGRATION AND TRANSCRIBE TEST
+
+Version 1.0.6 added PW Gemini speech recognition:
+* gemini-3.5-flash-lite for transcription.
+* gemini-3.5-flash for classification.
+* 120-second MP3 sections, at most two in flight.
+* Per-section caching, progress, Stop, bounded retries.
+* Timestamp validation and local VAD checking for empty speech results.
+* Speech and classification PW billing share the run total.
+
+Flash-Lite phrase timestamps are model-generated, not verified word alignment.
+Review real lecture cut boundaries before wider rollout.
+
+We then tested gemini-3.5-transcribe using the documented generateContent
+request with native VERBATIM word timestamps. Earlier advice that it necessarily
+required only the Interactions API was corrected: Google also documents
+generateContent support.
+
+Actual PW result on the same excerpt:
+HTTP 404, model_unavailable; no transcript; cost not reported.
+Diagnostic reference: 993B3E9631BB.
+Saved result: temp/pw_audio_benchmarks/9e9a8e0cac7a484f85e9bc7bf8f8b47f/report.json.
+No speed/accuracy comparison was possible. This proves failure through the
+current PW setup, not global unavailability of Google's model. PW administrators
+must check model access and routing through /api/gemini/generate.
+The production app was not switched to Gemini Transcribe.
+
+12. CURRENT GROQ SWITCH AND QUOTAS
+
+The user asked to switch back to Groq whisper-large-v3-turbo. The personal
+launcher tools/start_groq.py now passes the existing private GROQ_API_KEY and
+explicitly sets PW_ASR_BACKEND=groq. LectureTrimmer-Groq.cmd and the personal
+desktop Groq shortcut invoke this launcher. It is not part of shared releases.
+
+Groq access was checked successfully without uploading audio.
+Classification remains on PW Gemini.
+
+IMPORTANT DISTINCTION: the normal packaged config still defaults to pw_gemini
+unless overridden. The personal Groq launcher explicitly selects Groq. Opening
+the generic shortcut without this environment may use PW Gemini again. Do not
+claim the distributable contains the owner's Groq key.
+
+Earlier repeated failures were Groq HTTP 429 rate_limit_exceeded. The user's
+console showed 20 requests/minute, 2,000/day, 7,200 audio seconds/hour, and
+28,800 audio seconds/day. Chunking cannot bypass audio-duration quotas. Paid
+accounts can also have limits; check the actual organization/project allowance.
+Completed audio chunks are cached so retrying need not repeat successful work.
+
+13. TRANSCRIPT DOWNLOADS IN VERSION 1.0.7
+
+The user wanted files for a senior showing timestamps and recognized speech.
+lecture_trimmer/media/transcript_export.py now writes:
+* transcript.txt — readable segment timestamps and speech.
+* transcript.srt — subtitle file.
+* transcript.json — raw segments and available word alignment.
+* word_timestamps.txt — only if word timestamps actually exist.
+
+The UI exposes these in Transcript & analysis files immediately after speech
+recognition, before classification/rendering. Downloads survive later analysis
+failure. FileOwnership.publish stages and grants these files to their owner.
+
+All times refer to the ORIGINAL lecture, not trimmed outputs. Recognized speech
+is preserved before study filtering. Classification labels/retention reasons and
+cut ranges are in analysis.json, not the raw transcript TXT.
+
+Existing verified saved Groq results were exported without new API calls:
+
+output/senior-review/physics-original/
+  transcript.txt, transcript.srt, transcript.json
+  2h7m40s lecture; 2,372 segments; no saved word timestamps.
+
+output/senior-review/lecture-1h57m44s/
+  transcript.txt, transcript.srt, transcript.json, word_timestamps.txt
+  2,015 segments; 14,907 words.
+
+Do not fabricate word alignment for older caches that lack it. Older raw ASR
+output can contain questionable speech/timing around silence. These exports
+are material for review, not human-verified ground truth.
+
+14. COST ACCOUNTING
+
+AI usage stores actual PW-reported INR costs, requests, models and tokens.
+One analysis is shared by selected outputs. Retries count; connection checks
+and previous runs do not belong to the current job. Missing prices remain
+unknown or a partial subtotal; failure/timeout does not imply zero cost.
+Usage is saved even on failure and displayed during processing.
+
+PW Gemini transcription and classification charges are combined when using
+pw_gemini. GROQ SPEECH CHARGES ARE NOT INCLUDED IN THE PW GEMINI TOTAL.
+Do not label that amount as the full end-to-end bill for a Groq run.
+
+15. LAST VERIFIED STATE AND TESTS
+
+The latest full suite passed 213 tests in 86.636 seconds. Tests cover auth,
+ownership, caches, cancellation, transcript exports, billing, classification
+validation, failures, and real FFmpeg outputs. AI responses in regression tests
+are simulated; the separate PW benchmarks made real requests.
+
+The 1.0.7 signed update passed isolated installed-EXE smoke testing. It requires
+sign-in, bundles media tools, imports speech dependencies, and contains no
+personal provider keys. It was installed locally and reopened via the Groq
+launcher. Prior 1.0.6 was retained.
+
+Last verified app URL: http://127.0.0.1:65365
+Ports are dynamic. Read %LOCALAPPDATA%\LectureTrimmer\app-url.txt for the current
+URL, and check processes/logs before claiming the app is still running.
+
+IDE file inspected during handover:
+C:\Users\Niwas\Downloads\analysis (2).json
+
+This SAVED SNAPSHOT reported physics original.mp4, duration 7660.053333 seconds,
+status analysing, analysis version lessons-v5.2-study-only, rendering version
+render-v4-pcm, Groq transcription not reused, transcription_seconds 105.92877,
+zero recorded PW requests, and no outputs at that point. It does not establish
+whether the live job subsequently completed or failed. Inspect latest logs and
+reports for live status.
+
+16. REMAINING WORK AND LIMITS
+
+* Human-review classification and cut quality on different real subjects,
+  teachers, Hinglish styles, board work, and uncertain speech.
+* Improve handling of ASR hallucinations, numbers/formulas and timing errors
+  where demonstrated; do not assume model-generated timestamps are exact.
+* Measure full input-to-output runtime and total cost on representative 2–4-hour
+  lectures. The saved fresh Groq transcription stage is not total processing time.
+* Resolve shared-user transcription setup and quotas without shipping owner keys.
+* Complete and verify Drive release publication/update channel.
+* Build a fresh installer if new recipients should start with the latest app.
+* PW administrator work is needed for Gemini 3.5 Transcribe availability.
+* Shared session/ownership/queue infrastructure is needed for multiple servers.
+
+Passing tests does not prove universal accuracy, a bug-free product, or completed
+production rollout. Preserve current functionality and evaluate improvements
+against real lecture evidence.
+
+17. OPERATING COMMANDS
+
+Run from D:\PW Automations\Lecture_Trimmer.
+
+Source UI:
+  python app.py
+
+Source PW desktop authentication:
+  python app.py --auth pw-desktop --host 127.0.0.1 --port 7861 --no-browser
+
+Check personal Groq access without uploading audio:
+  python tools/start_groq.py --check
+
+Open installed app with Groq explicitly:
+  python tools/start_groq.py
+
+Tests:
+  python -m unittest discover -s tests
+
+Example NEXT signed release; choose an unused higher version:
+  python tools/build_desktop.py --version 1.0.8 --release-only
+  python tools/smoke_desktop.py --version 1.0.8
+
+Python used during this work:
+C:\Users\Niwas\AppData\Local\Programs\Python\Python311\python.exe
+
+Inspect files and current state before edits. Keep generated data, credentials,
+backups, media and signing keys outside release payloads. Do not overwrite old
+release versions, bypass access controls, discard existing work, or print secrets.

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Lecture Trimmer" width="44" height="44">
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="#4f46e5"/>
+  <path d="M43 68Q83 52 120 77V187Q83 162 43 177Z" fill="#fff"/>
+  <path d="M136 77Q173 52 213 68V177Q173 162 136 187Z" fill="#c7d2fe"/>
+  <path d="M105 96Q105 90 111 93L164 123Q170 127 164 131L111 162Q105 165 105 159Z" fill="#14b8a6" stroke="#4f46e5" stroke-width="7" stroke-linejoin="round"/>
+</svg>

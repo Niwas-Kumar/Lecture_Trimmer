@@ -1,0 +1,19 @@
+"""Explicit dependency anchors for PyInstaller, without freezing the editable app modules."""
+import anthropic
+import google.genai
+import google.auth
+import google.auth.transport.requests
+import google.oauth2.id_token
+import google.oauth2.service_account
+import numpy
+import pydantic
+import dotenv
+import httpx
+import requests
+import uvicorn
+import fastapi
+import fastapi.testclient
+import starlette.staticfiles
+import groq
+import tkinter
+import cryptography.hazmat.primitives.asymmetric.ed25519

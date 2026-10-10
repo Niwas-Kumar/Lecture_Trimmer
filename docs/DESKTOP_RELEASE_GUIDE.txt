@@ -1,0 +1,90 @@
+LECTURE TRIMMER - DESKTOP RELEASE GUIDE
+
+Run build commands from the repository root. The source layout is documented
+in docs/ARCHITECTURE.md; release files are listed in tools/release_manifest.py.
+
+FILES TO SHARE
+LectureTrimmer-1.0.0-Setup.exe is the one-time Windows installer.
+It installs for the current Windows account and creates desktop/Start Menu shortcuts.
+Python and FFmpeg are included. The installed app opens the workspace in the user's browser.
+The portable Windows ZIP is an alternative: extract the ENTIRE folder and run LectureTrimmer.exe.
+Do not send only the small LectureTrimmer.exe from the portable folder; it needs _internal beside it.
+Do not share .env, .release-private, temp, output, logs, or the development project folder.
+
+AUTHENTICATION
+The existing Google Desktop OAuth and PW Lecture_Trimmer allowlist are retained.
+Users sign in with an approved @pw.live account. Keep the authentication Google Sheet private.
+The installer contains public installed-app OAuth configuration, not service-account credentials,
+Google provider keys, Google refresh tokens, or your signed-in session. It DOES contain the
+owner's Groq key (see SPEECH RECOGNITION).
+Google OAuth testing-mode restrictions still apply; add approved testers or publish the OAuth app
+using your organisation's normal Google Cloud process before wider rollout.
+
+SPEECH RECOGNITION
+Speech recognition is Groq Whisper only (PW Flash-Lite, Sarvam and local Whisper were removed
+on 10 Oct 2026). By the owner's decision (10 Oct 2026) the installer contains the owner's Groq key,
+taken from .env at build time, so users need no setup. It is stored encoded in the installer's
+resources (speech-key.dat), never in the signed update ZIP or in Git. It is NOT secret from anyone
+who has the installer, and all users share the owner's Groq allowance (free tier: 8 h of audio/day).
+If it leaks or must change: revoke it at console.groq.com, put the new key in .env and build a new
+installer; users reinstall (their lectures are kept). A user's own GROQ_API_KEY environment
+variable takes precedence. Planned: switch to Gemini 3.5 Transcribe through PW once PW enables it.
+Classification stays on Gemini 3.5 Flash through PW.
+
+UPDATE CHANNEL - ONE-TIME OWNER SETUP
+Your folder: https://drive.google.com/drive/folders/1d7fGM93tAx2YuUCjU5-RmxbyLxtr_zBT
+At the time of preparation this folder required sign-in for downloads.
+The desktop updater supports a publicly readable latest.json file and signed code ZIPs.
+Only release files need link-viewer access. Do not change the private authentication Sheet.
+
+1. Upload LectureTrimmer-1.0.0-update.zip to the release folder.
+2. Make that release ZIP readable to anyone with its link, then copy its Drive FILE link.
+3. In PowerShell, from D:\PW Automations\Lecture_Trimmer, run:
+   python tools/build_desktop.py --version 1.0.0 --publish-existing --archive-url "PASTE_ZIP_FILE_LINK"
+   This signs the existing ZIP's download link. It does not rebuild the ZIP you uploaded.
+4. Upload releases\1.0.0\latest.json. Give that release metadata file link-viewer access.
+5. Copy the latest.json FILE link (not the folder link). In the desktop app, expand Update settings,
+   paste the link, and click Check for updates. The app verifies the signature before saving it.
+   The setting is retained, so users do this only once.
+6. To preconfigure the link in future installers and remove that step for users:
+   python tools/build_desktop.py --version 1.0.0 --manifest-url "PASTE_LATEST_JSON_FILE_LINK"
+   This rebuilds the installer with the link; it does not publish or change Drive permissions.
+
+FUTURE CODE / PROMPT / UI UPDATES
+1. Make and test the source changes. Choose a higher version, such as 1.0.1.
+2. Run: python tools/build_desktop.py --version 1.0.1 --release-only
+3. Upload releases\1.0.1\LectureTrimmer-1.0.1-update.zip and copy its readable Drive FILE link.
+4. Run: python tools/build_desktop.py --version 1.0.1 --publish-existing --archive-url "PASTE_NEW_ZIP_LINK"
+5. In Drive, use Manage versions > Upload new version on the ORIGINAL latest.json file.
+   Upload releases\1.0.1\latest.json. Keep the same Drive file ID/link. Do not delete/re-create it.
+6. Users click Check for updates, then Restart to apply update. No reinstallation is needed.
+   Only application code is downloaded. Saved videos, transcripts, models and settings stay intact.
+
+Keep .release-private\signing-key.bin backed up privately. The matching public verification key
+is built into the runtime. Losing or changing the private key breaks trust with existing installs.
+Do not upload the signing key to the release folder. An invalid signature/hash fails closed.
+Updates cannot start during lecture processing. The previous application version is retained;
+a failed new-version startup falls back to it. Runtime/dependency changes may require a new
+installer; this first updater intentionally handles application code, not Python/FFmpeg changes.
+
+SUPPORT / ERRORS
+Users see a short message and error reference. Ask them to click Save support report and send
+that ZIP to you. No automatic uploads occur. Reports include app version, exception type,
+stage, code locations and safe provider status/category; no videos, transcripts or API keys.
+Detailed rotating local logs are at %LOCALAPPDATA%\LectureTrimmer\logs.
+Reports and output videos are under %LOCALAPPDATA%\LectureTrimmer\output.
+The app retains up to 200 diagnostic error records and about 10 MB of rotating app logs.
+The desktop-startup log is reset per start. Review any additional raw local files before sharing.
+
+RELEASE LIMITATIONS
+The installer is not Authenticode-signed; Windows may show an unknown-publisher warning.
+For wider organisational distribution, sign the installer with your organisation's code-signing
+certificate. Update-manifest signing is a separate protection and does not remove SmartScreen.
+Speech recognition uses the packaged owner Groq key (shared allowance); classification requires an approved PW account and quota.
+
+INSTALLER REPAIR
+The corrected installer includes safehttpx/version.txt and groovy/version.txt.
+Close the desktop launcher before running setup on an existing installation.
+Setup retains the old runtime in a LectureTrimmer-backup-* folder under Programs.
+User videos, models and settings remain in the separate LectureTrimmer data folder.
+Your current installed copy was repaired in place and does not need reinstallation.

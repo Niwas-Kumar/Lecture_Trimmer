@@ -1,8 +1,11 @@
 anthropic>=1.0.0      # classifier backend "claude"
-google-genai>=1.14.0  # classifier backend "gemini" (free tier)
-faster-whisper>=1.1.0
+google-genai>=1.30.0  # Gemini; requires explicit SDK HTTP retry control
 pydantic>=2.0.0
 python-dotenv>=1.0.0
-gradio>=5.0.0
-groq>=0.20.0          # optional: cloud ASR backend (--asr groq)
-sarvamai>=0.1.30      # optional: Indic cloud ASR backend (--asr sarvam)
+fastapi>=0.115,<1     # web server for the studio and its API
+google-auth[requests]>=2.40,<3  # private Google Sheets and verified Google sign-in
+httpx>=0.28,<1
+requests>=2.32,<3     # PW access adapter
+uvicorn>=0.30,<1
+groq>=0.20.0          # speech recognition (Groq Whisper)
+cryptography>=44      # verifies signed desktop application updates
